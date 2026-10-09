@@ -20,7 +20,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from . import IServData, IServDataUpdateCoordinator, IServSchoolStart
+from . import IServData, IServDataUpdateCoordinator, IServLesson, IServSchoolStart
 from .const import (
     ATTRIBUTION,
     DEVICE_NAME,
@@ -204,33 +204,54 @@ class IServNextSchoolStartSensor(IServBaseSensor):
 class IServTimetableSensor(IServBaseSensor):
     """Weekly timetable with cancellations and substitutions.
 
-    The state counts the lessons that really take place today. The attributes
-    contain the complete fetched timetable (current + following week) grouped
-    by day. Every lesson carries a ``status`` field
-    (``regular`` / ``substituted`` / ``cancelled``) so that Lovelace cards can
-    mark cancelled lessons in red or strike them through.
+    The state counts the lessons that really take place on the day the sensor
+    currently points to: today while the school day has lessons, otherwise the
+    next school day. That way the sensor keeps showing a useful value at the
+    weekend or during the holidays. The attributes contain the complete fetched
+    timetable (current + two following weeks) grouped by day. Every lesson
+    carries a ``status`` field (``regular`` / ``substituted`` / ``cancelled``)
+    so that Lovelace cards can mark cancelled lessons in red or strike them
+    through.
     """
 
     _attr_icon = "mdi:timetable"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _unrecorded_attributes = frozenset(
-        {"days", "today", "tomorrow", "cancelled", "substituted"}
+        {"days", "today", "tomorrow", "lessons", "cancelled", "substituted"}
     )
 
     def __init__(self, coordinator: IServDataUpdateCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry, SENSOR_TIMETABLE)
 
     @property
-    def native_value(self) -> int:
-        """Return the number of lessons that take place today."""
+    def display_day(self) -> date | None:
+        """Return the day the state refers to (today, else the next school day)."""
         today = self.today
-        return len([lesson for lesson in self.data.lessons_on(today) if not lesson.canceled])
+        if self.data.lessons_on(today):
+            return today
+        next_start = self.data.next_school_start(dt_util.now())
+        return next_start.date if next_start is not None else None
+
+    @property
+    def next_lesson(self) -> IServLesson | None:
+        """Return the next lesson that has not started yet."""
+        return self.data.next_lesson(dt_util.now())
+
+    @property
+    def native_value(self) -> int:
+        """Return the number of lessons that take place on the displayed day."""
+        day = self.display_day
+        if day is None:
+            return 0
+        return len([lesson for lesson in self.data.lessons_on(day) if not lesson.canceled])
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the whole timetable grouped by day."""
         data = self.data
         today = self.today
+        day = self.display_day
+        next_lesson = self.next_lesson
         days: dict[str, Any] = {}
         for lesson in data.sorted_lessons():
             key = lesson.date.isoformat()
@@ -248,11 +269,17 @@ class IServTimetableSensor(IServBaseSensor):
         next_start = data.next_school_start(dt_util.now())
         attributes: dict[str, Any] = {
             "days": days,
-            "school_days": [day.isoformat() for day in data.school_days],
+            "school_days": [school_day.isoformat() for school_day in data.school_days],
             "today": [lesson.as_dict() for lesson in data.lessons_on(today)],
             "tomorrow": [
                 lesson.as_dict() for lesson in data.lessons_on(today + timedelta(days=1))
             ],
+            "date": day.isoformat() if day else None,
+            "day": WEEKDAYS_DE[day.weekday()] if day else None,
+            "weekday": day.weekday() if day else None,
+            "is_today": day == today,
+            "lessons": [lesson.as_dict() for lesson in data.lessons_on(day)] if day else [],
+            "next_lesson": next_lesson.as_dict() if next_lesson is not None else None,
             "cancelled": [
                 lesson.as_dict() for lesson in data.sorted_lessons() if lesson.canceled
             ],

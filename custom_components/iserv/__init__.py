@@ -55,17 +55,15 @@ from .const import (
     TIME_SOURCE_ISERV,
     TIME_SOURCE_UNKNOWN,
     TIMETABLE_DATA_PATH,
+    TIMETABLE_RAW_PATH,
     VERSION,
     WEEKDAYS_DE,
+    WEEK_OFFSETS,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
-
-# Week offsets that are fetched so that "next school day" also works on
-# Friday, Saturday and Sunday.
-WEEK_OFFSETS: tuple[int, ...] = (0, 1)
 
 # A page only counts as a login page if it really contains a password input.
 # Every page of a logged in IServ session contains <form> tags (logout, search)
@@ -100,6 +98,17 @@ _LOGIN_ERROR_PHRASES: tuple[str, ...] = (
     "account gesperrt",
     "konto gesperrt",
 )
+
+# Weekday names as IServ delivers them (German and English, long and short).
+_WEEKDAY_INDEX: dict[str, int] = {
+    **{name.lower(): index for index, name in enumerate(WEEKDAYS_DE)},
+    **{
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4,
+        "saturday": 5, "sunday": 6,
+        "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+        "mo": 0, "di": 1, "mi": 2, "do": 3, "fr": 4, "sa": 5, "so": 6,
+    },
+}
 
 
 class IServError(Exception):
@@ -156,9 +165,57 @@ def _week_monday(week_offset: int = 0) -> date:
 
 
 def _week_filter(monday: date) -> str:
-    """Return the IServ table filter that selects a whole week."""
+    """Return the IServ ``filter`` parameter that selects a whole week.
+
+    IServ expects a JSON object with German dates (``DD.MM.YYYY``), a
+    ``changesUntil`` marker and a ``%`` wildcard for classes, teachers and
+    rooms. Sending a plain query string instead made
+    ``/iserv/timetable/data`` answer without a single lesson.
+    """
     sunday = monday + timedelta(days=6)
-    return f"startDate={monday.strftime('%Y-%m-%d')}&endDate={sunday.strftime('%Y-%m-%d')}"
+    return json.dumps(
+        {
+            "startDate": monday.strftime("%d.%m.%Y"),
+            "endDate": sunday.strftime("%d.%m.%Y"),
+            "changesUntil": None,
+            "classes": ["%"],
+            "teachers": ["%"],
+            "rooms": ["%"],
+        },
+        separators=(",", ":"),
+    )
+
+
+def _course_filter(course_ids: tuple[str, ...]) -> str:
+    """Return the DieSchulApp ``filterBy`` value for the given course ids.
+
+    Installations with more than one child or course answer with an empty
+    lesson list unless the main course of the pupil is requested explicitly.
+    """
+    safe_ids = [course_id for course_id in course_ids if course_id.isdecimal()]
+    return "courseSubject.course:in(" + ",".join(safe_ids) + ")"
+
+
+def _main_course_ids(payload: Any) -> tuple[str, ...]:
+    """Return the numeric main course ids of a DieSchulApp response."""
+    if not isinstance(payload, dict):
+        return ()
+    students = payload.get("students")
+    if not isinstance(students, list):
+        return ()
+    course_ids: list[str] = []
+    for student in students:
+        if not isinstance(student, dict):
+            continue
+        main_course = student.get("mainCourse")
+        if not isinstance(main_course, dict):
+            continue
+        course_id = main_course.get("id")
+        if isinstance(course_id, int) and not isinstance(course_id, bool):
+            course_ids.append(str(course_id))
+        elif isinstance(course_id, str) and course_id.strip().isdecimal():
+            course_ids.append(course_id.strip())
+    return tuple(dict.fromkeys(course_ids))
 
 
 def _extract_hidden_inputs(html: str) -> dict[str, str]:
@@ -313,6 +370,21 @@ def _period_number(*values: Any) -> int | None:
     return None
 
 
+def _period_from_start(start: str) -> int | None:
+    """Return the period (\"Stunde\") whose raster starts at ``start``.
+
+    The oldest IServ export only delivers ``start_time``/``end_time`` without a
+    period, so the number is derived from the official raster.
+    """
+    start_hm = _clock_time(start)
+    if not start_hm:
+        return None
+    for period, (grid_start, _grid_end) in FALLBACK_PERIOD_TIMES.items():
+        if grid_start == start_hm:
+            return period
+    return None
+
+
 def _entry_date(entry: dict[str, Any], slot: dict[str, Any] | None, monday: date) -> date | None:
     """Determine the real date of a timetable entry."""
     explicit = _first_string(entry, "date", "lessonDate")
@@ -325,9 +397,12 @@ def _entry_date(entry: dict[str, Any], slot: dict[str, Any] | None, monday: date
     if isinstance(weekday, int) and not isinstance(weekday, bool) and 0 <= weekday <= 6:
         return monday + timedelta(days=weekday)
 
-    name = _first_string(entry, "weekdayName", "day")
-    if name in WEEKDAYS_DE:
-        return monday + timedelta(days=WEEKDAYS_DE.index(name))
+    name = _first_string(entry, "weekdayName", "weekday_name", "day")
+    if name:
+        # IServ delivers the weekday either in German or in English ("Monday").
+        index = _WEEKDAY_INDEX.get(name.rstrip(".").lower())
+        if index is not None:
+            return monday + timedelta(days=index)
 
     if isinstance(slot, dict):
         started = _first_string(slot, "start", "startTime", "start_time")
@@ -571,6 +646,26 @@ class IServData:
             return start
         return None
 
+    def next_lesson(self, now: datetime) -> IServLesson | None:
+        """Return the next lesson that has not started yet.
+
+        The search starts today and continues over the following days, so on a
+        Friday evening (or on the weekend / during a holiday) the next lessons
+        of the next school day are found instead of ``None``. Cancelled lessons
+        are skipped because they do not take place.
+        """
+        today = now.date()
+        now_hm = now.strftime("%H:%M")
+        for offset in range(MAX_LOOKAHEAD_DAYS):
+            target = today + timedelta(days=offset)
+            for lesson in self.lessons_on(target):
+                if lesson.canceled or not lesson.start_time:
+                    continue
+                if offset == 0 and lesson.start_time <= now_hm:
+                    continue
+                return lesson
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Parsing helpers
@@ -717,17 +812,51 @@ def _lesson_from_entry(
     )
 
 
-def _parse_current_timetable(payload: Any, monday: date) -> list[IServLesson]:
-    """Parse the ``/dieschulapp/api/1.0/current-timetable/`` response."""
-    entries: list[Any] | None = None
+def _current_timetable_entries(payload: Any) -> list[dict[str, Any]] | None:
+    """Return the lesson list of a DieSchulApp response.
+
+    The real API wraps the lessons in ``students[].entries``; the documented
+    example (and some simplified builds) put them directly into
+    ``entries``/``lessons``/``timetable``/``data``. ``None`` means "unknown
+    response shape" and makes the caller fall back to another endpoint.
+    """
     if isinstance(payload, list):
-        entries = payload
-    elif isinstance(payload, dict):
-        for key in ("entries", "lessons", "timetable", "data"):
-            candidate = payload.get(key)
-            if isinstance(candidate, list):
-                entries = candidate
-                break
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return None
+
+    for key in ("entries", "lessons", "timetable", "data"):
+        candidate = payload.get(key)
+        if isinstance(candidate, list):
+            return [item for item in candidate if isinstance(item, dict)]
+
+    data = payload.get("data")
+    if isinstance(data, dict):
+        nested = _current_timetable_entries(data)
+        if nested is not None:
+            return nested
+
+    students = payload.get("students")
+    if not isinstance(students, list):
+        return None
+
+    collected: list[dict[str, Any]] = []
+    for student in students:
+        if not isinstance(student, dict):
+            continue
+        candidate = student.get("entries")
+        if isinstance(candidate, list):
+            collected.extend(item for item in candidate if isinstance(item, dict))
+    return collected
+
+
+def _parse_current_timetable(payload: Any, monday: date) -> list[IServLesson]:
+    """Parse the ``/dieschulapp/api/1.0/current-timetable/`` response.
+
+    Lessons live in ``students[].entries`` and use a ``timeTableSlot`` object
+    for the period and the start/end time.
+    """
+    entries = _current_timetable_entries(payload)
     if entries is None:
         raise _EndpointUnavailable("no timetable entries in the current-timetable response")
 
@@ -862,6 +991,53 @@ def _parse_timetable_data(payload: Any, monday: date) -> list[IServLesson]:
     return lessons
 
 
+def _parse_raw_plan(payload: Any, monday: date) -> list[IServLesson]:
+    """Parse the oldest API generation (``/iserv/plan/show/raw``).
+
+    This endpoint answers with a plain JSON list of lessons that carry a
+    weekday name plus ``start_time``/``end_time`` instead of a date and a slot
+    object.
+    """
+    if isinstance(payload, dict):
+        for key in ("lessons", "entries", "timetable", "data", "rows"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                payload = candidate
+                break
+        else:
+            raise _EndpointUnavailable("no lessons in the raw plan response")
+    if not isinstance(payload, list) or not payload:
+        raise _EndpointUnavailable("no lessons in the raw plan response")
+
+    lessons: list[IServLesson] = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        lesson_date = _entry_date(entry, None, monday)
+        if lesson_date is None:
+            continue
+        period = _period_number(
+            entry.get("period"),
+            entry.get("lesson"),
+            entry.get("lessonNumber"),
+            entry.get("number"),
+        )
+        start = _first_string(entry, "start_time", "startTime", "start", "from")
+        end = _first_string(entry, "end_time", "endTime", "end", "to")
+        if period is None:
+            # The raw export has no period, derive it from the official raster.
+            period = _period_from_start(start)
+        normalized = dict(entry)
+        if normalized.get("canceled") is True or normalized.get("cancelled") is True:
+            # Reuse the well-known IServ label so that the lesson is marked as
+            # cancelled and gets a readable note.
+            normalized.setdefault("substitutionType", "Ausfall")
+        lesson = _lesson_from_entry(normalized, lesson_date, period, start, end)
+        if lesson is not None:
+            lessons.append(lesson)
+    return lessons
+
+
 # ---------------------------------------------------------------------------
 # API client
 # ---------------------------------------------------------------------------
@@ -880,6 +1056,9 @@ class IServApiClient:
         self._username = username.strip()
         self._password = password
         self._logged_in = False
+        # Course ids the DieSchulApp API has to be filtered by. They are
+        # discovered from the first response (see ``_main_course_ids``).
+        self._course_ids: tuple[str, ...] = ()
 
     @property
     def base_url(self) -> str:
@@ -904,8 +1083,14 @@ class IServApiClient:
         data: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         allow_redirects: bool = True,
+        unavailable_statuses: tuple[int, ...] = (),
     ) -> tuple[str, str]:
-        """Perform a request and return ``(body, final_url)``."""
+        """Perform a request and return ``(body, final_url)``.
+
+        ``unavailable_statuses`` lists HTTP codes that mean "this IServ
+        installation does not offer the endpoint" (raised as
+        :class:`_EndpointUnavailable` so that the caller can try the next one).
+        """
         timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT, connect=CONNECTION_TIMEOUT)
         try:
             async with self._session.request(
@@ -926,6 +1111,8 @@ class IServApiClient:
         _LOGGER.debug("IServ %s %s answered HTTP %s (%s)", method, url, status, final_url)
         if status in (401, 403):
             raise IServAuthError(f"IServ denied {method} {final_url} with HTTP {status}")
+        if status in unavailable_statuses:
+            raise _EndpointUnavailable(f"IServ answered HTTP {status} for {method} {final_url}")
         if status >= 400:
             raise IServConnectionError(f"IServ answered HTTP {status} for {method} {final_url}")
         return text, final_url
@@ -1035,45 +1222,101 @@ class IServApiClient:
         self._logged_in = True
         _LOGGER.debug("IServ login successful (%s -> %s)", path, final_url)
 
-    async def _async_fetch_current_timetable(self, week_offset: int) -> Any:
-        """Fetch one week from the DieSchulApp JSON API (with substitutions)."""
+    async def _async_fetch_current_timetable(
+        self, week_offset: int, course_ids: tuple[str, ...] = ()
+    ) -> Any:
+        """Fetch one week from the DieSchulApp JSON API (with substitutions).
+
+        Installations with several courses/pupils only return lessons when the
+        request asks for the main course (``filterBy``), otherwise the answer
+        contains the pupils but no entries.
+        """
+        params = {
+            "date": _week_monday(week_offset).isoformat(),
+            "week": "true",
+            "substitutions": "true",
+        }
+        if course_ids:
+            params["filterBy"] = _course_filter(course_ids)
         text, final_url = await self._async_text(
             "GET",
             self._url(CURRENT_TIMETABLE_PATH),
-            params={
-                "date": _week_monday(week_offset).isoformat(),
-                "week": "true",
-                "substitutions": "true",
-            },
+            params=params,
+            unavailable_statuses=(404, 405),
         )
         return self._loads(text, final_url)
+
+    async def _async_lessons_from_current_timetable(
+        self, week_offset: int, monday: date
+    ) -> list[IServLesson]:
+        """Read one week from the DieSchulApp API, filtered by course if needed."""
+        payload = await self._async_fetch_current_timetable(week_offset, self._course_ids)
+        lessons = _parse_current_timetable(payload, monday)
+        if lessons or self._course_ids:
+            return lessons
+
+        course_ids = _main_course_ids(payload)
+        if not course_ids:
+            return lessons
+        _LOGGER.debug(
+            "IServ answered without lessons for week %s, retrying with %s",
+            week_offset,
+            _course_filter(course_ids),
+        )
+        self._course_ids = course_ids
+        filtered = await self._async_fetch_current_timetable(week_offset, course_ids)
+        return _parse_current_timetable(filtered, monday)
 
     async def _async_fetch_timetable_data(self, week_offset: int) -> Any:
         """Fetch one week from the legacy JSON API."""
         monday = _week_monday(week_offset)
-        url = f"{self._url(TIMETABLE_DATA_PATH)}?dataType=json&{_week_filter(monday)}"
-        text, final_url = await self._async_text("GET", url)
+        text, final_url = await self._async_text(
+            "GET",
+            self._url(TIMETABLE_DATA_PATH),
+            params={"dataType": "json", "filter": _week_filter(monday)},
+            unavailable_statuses=(404, 405),
+        )
+        return self._loads(text, final_url)
+
+    async def _async_fetch_raw_plan(self, week_offset: int) -> Any:
+        """Fetch one week from the oldest API generation (``plan/show/raw``)."""
+        monday = _week_monday(week_offset)
+        text, final_url = await self._async_text(
+            "GET",
+            self._url(TIMETABLE_RAW_PATH),
+            params={"filter": _week_filter(monday)},
+            unavailable_statuses=(404, 405),
+        )
         return self._loads(text, final_url)
 
     async def _async_get_lessons_once(self, week_offset: int) -> list[IServLesson]:
-        """Try every known IServ timetable endpoint once."""
+        """Try every known IServ timetable endpoint once.
+
+        Newest generation first (DieSchulApp JSON API), then the older
+        timetable data API and finally the raw plan export. An endpoint that is
+        missing on this installation is skipped silently, but a valid answer
+        counts even if it contains no lessons (e.g. holidays).
+        """
         monday = _week_monday(week_offset)
         problems: list[str] = []
-        for fetch, parse in (
-            (self._async_fetch_current_timetable, _parse_current_timetable),
-            (self._async_fetch_timetable_data, _parse_timetable_data),
+
+        try:
+            return await self._async_lessons_from_current_timetable(week_offset, monday)
+        except _EndpointUnavailable as err:
+            _LOGGER.debug("IServ current-timetable unusable for week %s: %s", week_offset, err)
+            problems.append(str(err))
+
+        for name, fetch, parse in (
+            ("timetable-data", self._async_fetch_timetable_data, _parse_timetable_data),
+            ("plan-raw", self._async_fetch_raw_plan, _parse_raw_plan),
         ):
             try:
                 payload = await fetch(week_offset)
                 return parse(payload, monday)
             except _EndpointUnavailable as err:
-                _LOGGER.debug(
-                    "IServ endpoint %s unusable for week %s: %s",
-                    fetch.__name__,
-                    week_offset,
-                    err,
-                )
+                _LOGGER.debug("IServ %s unusable for week %s: %s", name, week_offset, err)
                 problems.append(str(err))
+
         raise IServConnectionError(
             f"No usable IServ endpoint for week {week_offset}: {'; '.join(problems)}"
         )
@@ -1115,7 +1358,7 @@ class IServDataUpdateCoordinator(DataUpdateCoordinator[IServData]):
         self.entry = entry
 
     async def _async_update_data(self) -> IServData:
-        """Fetch the current week and (best effort) the following week."""
+        """Fetch the current week and the two following weeks (best effort)."""
         lessons: list[IServLesson] = []
         try:
             lessons.extend(await self.client.async_get_lessons(WEEK_OFFSETS[0]))

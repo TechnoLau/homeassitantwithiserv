@@ -6,7 +6,7 @@ from typing import Final
 
 # --- Integration metadata -------------------------------------------------
 DOMAIN: Final = "iserv"
-VERSION: Final = "1.0.1"
+VERSION: Final = "1.0.2"
 
 # Exactly one Home Assistant device holds every IServ entity.
 DEVICE_NAME: Final = "IServ"
@@ -43,6 +43,17 @@ LOGIN_PATHS: Final = ("/iserv/app/login", "/iserv/login", "/iserv/")
 CURRENT_TIMETABLE_PATH: Final = "/iserv/dieschulapp/api/1.0/current-timetable/"
 # Older JSON API used as a fallback.
 TIMETABLE_DATA_PATH: Final = "/iserv/timetable/data"
+# Oldest IServ generation: the raw export of the plan module (a plain JSON
+# lesson list with ``day``/``start_time``/``end_time``). Used as the last
+# fallback when neither the DieSchulApp nor the timetable data API answers.
+TIMETABLE_RAW_PATH: Final = "/iserv/plan/show/raw"
+
+# --- Fetch window ---------------------------------------------------------
+# Week offsets that are fetched on every update (0 = current week). The two
+# following weeks make sure the "next school day" sensors still work on
+# Friday/Saturday/Sunday and when the coming week is empty (holidays) or not
+# published by the school yet.
+WEEK_OFFSETS: Final = (0, 1, 2)
 
 # --- Sensors (unique id suffix == translation key) ------------------------
 SENSOR_SUBSTITUTIONS: Final = "substitutions"

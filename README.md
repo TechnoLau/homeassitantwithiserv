@@ -8,7 +8,8 @@ in Home Assistant bereit.
 
 > **Hinweis:** Die Integration nutzt die inoffiziellen Web-Endpunkte
 > (`/iserv/app/login`, `/iserv/dieschulapp/api/1.0/current-timetable/`,
-> `/iserv/timetable/data`). Sie ist kein offizielles Produkt der IServ GmbH.
+> `/iserv/timetable/data`, `/iserv/plan/show/raw`). Sie ist kein offizielles
+> Produkt der IServ GmbH.
 
 ---
 
@@ -19,16 +20,19 @@ in Home Assistant bereit.
 - **Ein einziges Gerät "IServ"** – alle Sensoren und Entitäten hängen an diesem
   einen Gerät (kein zweites Gerät, kein doppelter Eintrag)
 - Auslesen des Wochen-Stundenplans, der Vertretungen und der Ausfälle
-  (aktuelle **und** folgende Woche, damit auch Freitag/Samstag/Sonntag der
-  nächste Schultag korrekt bestimmt wird)
+  (aktuelle **und** die zwei folgenden Wochen, damit auch Freitag/Samstag/Sonntag
+  und Feiertage den nächsten Schultag korrekt bestimmen)
 - Drei Sensoren mit ausführlichen Attributen für Automationen:
   Vertretungen/Ausfälle, Schulbeginn am nächsten Schultag, kompletter Stundenplan
 - Fest hinterlegtes **Fallback-Zeitraster** (1.–6. Stunde), falls IServ keine
   Uhrzeiten liefert
 - Einstellbares Aktualisierungsintervall (Optionen-Flow)
 - Reauth- und Reconfigure-Flow (Passwort ändern, Server wechseln)
-- Fallback auf die ältere `/iserv/timetable/data`-API, falls die
-  DieSchulApp-API auf dem Server fehlt
+- Fallback auf die ältere `/iserv/timetable/data`-API und auf den Raw-Export
+  `/iserv/plan/show/raw` (mit IServ-Filterobjekt und deutschen Datumsangaben),
+  falls die DieSchulApp-API auf dem Server fehlt
+- Mehrere Kurse/Kinder: die DieSchulApp-API wird bei leerer Antwort automatisch
+  mit `filterBy=courseSubject.course:in(<Kurs-IDs>)` erneut abgefragt
 
 ## Installation
 
@@ -67,7 +71,7 @@ Gerät `IServ` mit den Entities `..._2`.
 | --- | --- | --- |
 | `sensor.iserv_vertretungen` | Anzahl der Ausfälle + Vertretungen **heute** | Vertretungsplan (Details in den Attributen) |
 | `sensor.iserv_schulbeginn` | Uhrzeit `HH:MM` des ersten Unterrichts am **nächsten Schultag** | z. B. `08:10`, bei Ausfall der 1. Stunde `09:00` |
-| `sensor.iserv_stundenplan` | Anzahl der Stunden, die **heute** stattfinden | Wochen-Stundenplan inkl. Status-Marker |
+| `sensor.iserv_stundenplan` | Anzahl der Stunden am **angezeigten Schultag** (heute, sonst nächster Schultag) | Wochen-Stundenplan inkl. Status-Marker |
 
 Bei englischer Home-Assistant-Sprache heißen die Entitäten
 `sensor.iserv_substitutions`, `sensor.iserv_next_school_start` und
@@ -118,12 +122,21 @@ Tag mit Unterricht (Wochenenden und komplett ausgefallene Tage werden
 
 ### Attribute `sensor.iserv_stundenplan`
 
+- `date` / `day` / `weekday` – Tag, auf den sich Zustand und `lessons` beziehen
+  (heute; ist heute unterrichtsfrei, der nächste Schultag)
+- `is_today` – `true`, wenn sich der Zustand auf heute bezieht
+- `lessons` – Stundenliste des angezeigten Tages
+- `next_lesson` – nächste Stunde, die noch nicht begonnen hat (auch über das
+  Wochenende/Feiertage hinweg; ausgefallene Stunden werden übersprungen)
 - `days` – Wörterbuch `{"2026-09-11": {"date": ..., "day": "Freitag", "weekday": 4, "lessons": [...]}}`
 - `today` / `tomorrow` – Stundenlisten für heute/morgen
 - `cancelled` / `substituted` – alle ausgefallenen bzw. vertretenen Stunden
 - `school_days` – alle Tage mit Unterricht (ISO-Daten)
 - `next_school_day` / `next_school_start` – nächster Schultag und Beginn
 - `lessons_total`, `account`, `attribution`
+
+Am Wochenende, an Feiertagen und in den Ferien sind `today` und `days` ggf. leer;
+der Sensor zeigt dann automatisch den nächsten Schultag aus den geladenen Wochen.
 
 ### Aufbau eines Stunden-Objekts
 

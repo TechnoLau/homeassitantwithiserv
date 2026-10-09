@@ -1,0 +1,11 @@
+{
+  "domain": "iserv",
+  "name": "IServ Vertretungsplan",
+  "codeowners": ["@dein-github-username"],
+  "config_flow": true,
+  "documentation": "https://github.com/dein-github-username/iserv-homeassistant",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/dein-github-username/iserv-homeassistant/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

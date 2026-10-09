@@ -30,8 +30,9 @@
     },
     "error": {
       "invalid_host": "Die Serveradresse ist kein gültiger IServ-Host.",
-      "invalid_auth": "Benutzername oder Passwort ist falsch.",
+      "invalid_auth": "IServ hat den Benutzernamen oder das Passwort abgelehnt.",
       "cannot_connect": "Der IServ-Server ist nicht erreichbar.",
+      "cannot_read_timetable": "Die Anmeldung war erfolgreich, aber der Stundenplan konnte nicht gelesen werden. Bitte das Home-Assistant-Protokoll mit Debug-Logging für custom_components.iserv prüfen.",
       "unknown": "Unerwarteter Fehler, bitte prüfe das Home-Assistant-Protokoll."
     },
     "abort": {

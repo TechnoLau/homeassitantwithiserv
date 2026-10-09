@@ -6,7 +6,7 @@ from typing import Final
 
 # --- Integration metadata -------------------------------------------------
 DOMAIN: Final = "iserv"
-VERSION: Final = "1.0.0"
+VERSION: Final = "1.0.1"
 
 # Exactly one Home Assistant device holds every IServ entity.
 DEVICE_NAME: Final = "IServ"
@@ -36,8 +36,9 @@ MAX_LOGIN_REDIRECTS: Final = 3
 MAX_LOOKAHEAD_DAYS: Final = 21
 
 # --- IServ endpoint paths -------------------------------------------------
-# Login form discovery (returns the app specific login form via meta refresh).
-APP_LOGIN_PATH: Final = "/iserv/app/login"
+# Pages that are tried in order while searching the login form. IServ ships
+# several generations; some installations only answer on /iserv/login.
+LOGIN_PATHS: Final = ("/iserv/app/login", "/iserv/login", "/iserv/")
 # Newer "DieSchulApp" JSON API (returns timetable + substitutions).
 CURRENT_TIMETABLE_PATH: Final = "/iserv/dieschulapp/api/1.0/current-timetable/"
 # Older JSON API used as a fallback.

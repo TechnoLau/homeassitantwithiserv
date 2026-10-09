@@ -275,9 +275,16 @@ Config-Entry automatisch neu geladen.
 | Meldung | Ursache/Hilfe |
 | --- | --- |
 | „Serveradresse ist kein gültiger IServ-Host“ | Hostname prüfen (ohne `/iserv`-Pfad) |
-| „Benutzername oder Passwort ist falsch“ | Zugangsdaten prüfen, ggf. im IServ-Portal anmelden |
-| „Der IServ-Server ist nicht erreichbar“ | Netzwerk/DNS, evtl. nur im Schulnetz erreichbar |
+| „IServ hat den Benutzernamen oder das Passwort abgelehnt“ | Zugangsdaten prüfen: Der Benutzername ist bei IServ meist ohne `@schule.de` (nur der Accountname). Zum Test im IServ-Portal im selben Netz anmelden. |
+| „Die Anmeldung war erfolgreich, aber der Stundenplan konnte nicht gelesen werden“ | Der Login funktioniert, IServ liefert auf `/iserv/dieschulapp/api/1.0/current-timetable/` und `/iserv/timetable/data` aber kein JSON (z. B. weil das Stundenplan-/„DieSchulApp“-Modul für den Account nicht freigeschaltet ist). Debug-Log prüfen. |
+| „Der IServ-Server ist nicht erreichbar“ | Netzwerk/DNS, evtl. nur im Schulnetz bzw. über VPN erreichbar |
 | Keine Daten in den Sensoren | Debug-Log aktivieren und den Inhalt der HTTP-Antwort prüfen |
+
+Der Login wird in zwei Schritten geprüft: erst das Absenden des Login-Formulars,
+danach ein echter Stundenplan-Abruf. Nur wenn IServ das Formular mit einer
+Fehlermeldung (z. B. „Benutzername oder Passwort ist falsch“) erneut ausliefert,
+meldet die Integration ein falsches Passwort. Die erkannte IServ-Meldung steht
+dann im Protokoll.
 
 Debug-Log:
 
@@ -287,6 +294,10 @@ logger:
   logs:
     custom_components.iserv: debug
 ```
+
+Mit aktiviertem Debug-Log protokolliert die Integration jeden Request
+(Methode, URL, HTTP-Status), den gefundenen Login-Pfad, die verwendeten
+Formular-Felder sowie den Grund einer abgelehnten Anmeldung – ohne Passwörter.
 
 ## Lizenz
 

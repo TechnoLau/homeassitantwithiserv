@@ -30,7 +30,6 @@ from homeassistant.helpers.update_coordinator import (
 )
 
 from .const import (
-    APP_LOGIN_PATH,
     CANCEL_CHANGE_TYPE,
     CANCEL_SUBSTITUTION_TYPES,
     CONF_HOST,
@@ -43,6 +42,7 @@ from .const import (
     DEVICE_NAME,
     DOMAIN,
     FALLBACK_PERIOD_TIMES,
+    LOGIN_PATHS,
     MANUFACTURER,
     MAX_LOGIN_REDIRECTS,
     MAX_LOOKAHEAD_DAYS,
@@ -67,10 +67,39 @@ PLATFORMS: list[Platform] = [Platform.SENSOR]
 # Friday, Saturday and Sunday.
 WEEK_OFFSETS: tuple[int, ...] = (0, 1)
 
-# Recognised login form markers (IServ ships different login templates).
-_LOGIN_MARKERS = ("iserv", "login", "anmeld", "passwort", "password", "benutzer")
+# A page only counts as a login page if it really contains a password input.
+# Every page of a logged in IServ session contains <form> tags (logout, search)
+# and the word "IServ" as well, so plain text markers are not reliable.
+_PASSWORD_INPUT_RE = re.compile(
+    r"""<input\b[^>]*\btype\s*=\s*["']?\s*password\b""", re.IGNORECASE
+)
+# One single <form ...> ... </form> block of a HTML page.
+_FORM_BLOCK_RE = re.compile(r"<form\b[^>]*>.*?</form>", re.IGNORECASE | re.DOTALL)
+# One single <input ...> tag.
+_INPUT_TAG_RE = re.compile(r"<input\b[^>]*>", re.IGNORECASE)
 # Hidden inputs whose values look like a session id instead of a CSRF token.
 _SESSION_FIELD_MARKERS = ("session", "sid", "jsession", "phpsess", "authid")
+# Messages IServ shows on its login page after a failed login attempt.
+_LOGIN_ERROR_PHRASES: tuple[str, ...] = (
+    "benutzername oder passwort",
+    "benutzername ist falsch",
+    "passwort ist falsch",
+    "passwort falsch",
+    "falsches passwort",
+    "ungültige zugangsdaten",
+    "ungueltige zugangsdaten",
+    "anmeldung fehlgeschlagen",
+    "anmeldung ist fehlgeschlagen",
+    "anmeldung nicht möglich",
+    "login failed",
+    "login fehlgeschlagen",
+    "invalid credentials",
+    "incorrect username",
+    "wrong password",
+    "authentication failed",
+    "account gesperrt",
+    "konto gesperrt",
+)
 
 
 class IServError(Exception):
@@ -83,6 +112,10 @@ class IServAuthError(IServError):
 
 class IServConnectionError(IServError):
     """Raised when the IServ server cannot be reached or answers unexpectedly."""
+
+
+class IServDataError(IServError):
+    """Raised when the login worked but no timetable data could be read."""
 
 
 class _EndpointUnavailable(IServError):
@@ -159,11 +192,33 @@ def _meta_refresh_url(html: str, current_url: str) -> str | None:
 
 
 def _is_login_form(html: str) -> bool:
-    """Return True if the HTML still contains an IServ login form."""
+    """Return True if the HTML contains a real IServ login form.
+
+    Only a form that really contains a password input counts. A logged in IServ
+    page (the dashboard) contains <form> tags and the word "IServ" as well, so a
+    text based match marked the dashboard as login page. That made a successful
+    login look like a wrong password.
+    """
+    blocks = _FORM_BLOCK_RE.findall(html)
+    if blocks:
+        return any(_PASSWORD_INPUT_RE.search(block) for block in blocks)
+    # Some templates ship broken HTML without a closing </form>.
+    return bool(_PASSWORD_INPUT_RE.search(html))
+
+
+def _login_error_reason(html: str) -> str:
+    """Return the login error message of an IServ page ("" if there is none)."""
     lowered = html.lower()
-    if "<form" not in lowered:
-        return False
-    return any(marker in lowered for marker in _LOGIN_MARKERS)
+    for phrase in _LOGIN_ERROR_PHRASES:
+        if phrase in lowered:
+            return phrase
+    return ""
+
+
+def _page_title(html: str) -> str:
+    """Return the <title> of a HTML page (used for debug logging)."""
+    match = re.search(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
+    return unescape(match.group(1)).strip() if match else ""
 
 
 # ---------------------------------------------------------------------------
@@ -703,20 +758,58 @@ def _parse_current_timetable(payload: Any, monday: date) -> list[IServLesson]:
 # ---------------------------------------------------------------------------
 # Login helpers
 # ---------------------------------------------------------------------------
-def _form_action(html: str, current_url: str) -> str:
-    """Return the action URL of the first form of a HTML page."""
-    match = re.search(r"<form\b[^>]*>", html, flags=re.IGNORECASE)
-    if match is None:
-        return current_url
-    action = re.search(r"""action\s*=\s*["']([^"']*)["']""", match.group(0), flags=re.I)
-    if action is None or not action.group(1).strip():
-        return current_url
-    return urljoin(current_url, unescape(action.group(1).strip()))
+def _html_attr(tag: str, name: str) -> str:
+    """Return the value of an attribute of a HTML tag ("" if it is missing)."""
+    match = re.search(rf"""{name}\s*=\s*["']([^"']*)["']""", tag, flags=re.IGNORECASE)
+    return unescape(match.group(1)).strip() if match else ""
+
+
+@dataclass(slots=True)
+class _LoginForm:
+    """The login form of an IServ page."""
+
+    action: str
+    method: str
+    hidden: dict[str, str]
+    username_field: str
+    password_field: str
+
+
+def _find_login_form(html: str, base_url: str) -> _LoginForm | None:
+    """Return the form of a page that contains the password input.
+
+    IServ pages can contain several forms (search, logout, ...), so the form
+    holding the password field is used instead of blindly taking the first one.
+    """
+    for block in _FORM_BLOCK_RE.findall(html):
+        if not _PASSWORD_INPUT_RE.search(block):
+            continue
+        opening = re.search(r"<form\b[^>]*>", block, flags=re.IGNORECASE)
+        opening_tag = opening.group(0) if opening else ""
+        password_field = _form_field(block, ("pass", "pwd", "kennwort"), "_password")
+        username_field = _form_field(
+            block, ("user", "login", "benutz", "kennung"), "_username"
+        )
+        if username_field == password_field:
+            continue
+        hidden = {
+            name: value
+            for name, value in _extract_hidden_inputs(block).items()
+            if value or not any(marker in name.lower() for marker in _SESSION_FIELD_MARKERS)
+        }
+        return _LoginForm(
+            action=urljoin(base_url, _html_attr(opening_tag, "action") or base_url),
+            method=(_html_attr(opening_tag, "method") or "post").lower(),
+            hidden=hidden,
+            username_field=username_field,
+            password_field=password_field,
+        )
+    return None
 
 
 def _form_field(html: str, keywords: tuple[str, ...], default: str) -> str:
     """Return the name of the first visible input matching one of the keywords."""
-    for tag in re.findall(r"<input\b[^>]*>", html, flags=re.IGNORECASE):
+    for tag in _INPUT_TAG_RE.findall(html):
         if "hidden" in tag.lower():
             continue
         match = re.search(r"""name\s*=\s*["']([^"']+)["']""", tag, flags=re.I)
@@ -726,17 +819,6 @@ def _form_field(html: str, keywords: tuple[str, ...], default: str) -> str:
         if any(keyword in name.lower() for keyword in keywords):
             return name
     return default
-
-
-def _login_hidden_fields(html: str) -> dict[str, str]:
-    """Return the hidden fields that have to be posted back to the login form."""
-    fields: dict[str, str] = {}
-    for name, value in _extract_hidden_inputs(html).items():
-        lowered = name.lower()
-        if not value and any(marker in lowered for marker in _SESSION_FIELD_MARKERS):
-            continue
-        fields[name] = value
-    return fields
 
 
 def _parse_timetable_data(payload: Any, monday: date) -> list[IServLesson]:
@@ -820,6 +902,7 @@ class IServApiClient:
         *,
         params: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
         allow_redirects: bool = True,
     ) -> tuple[str, str]:
         """Perform a request and return ``(body, final_url)``."""
@@ -830,6 +913,7 @@ class IServApiClient:
                 url,
                 params=params,
                 data=data,
+                headers=headers,
                 allow_redirects=allow_redirects,
                 timeout=timeout,
             ) as response:
@@ -839,6 +923,7 @@ class IServApiClient:
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             raise IServConnectionError(f"{method} {url} failed: {err}") from err
 
+        _LOGGER.debug("IServ %s %s answered HTTP %s (%s)", method, url, status, final_url)
         if status in (401, 403):
             raise IServAuthError(f"IServ denied {method} {final_url} with HTTP {status}")
         if status >= 400:
@@ -856,29 +941,99 @@ class IServApiClient:
         except json.JSONDecodeError as err:
             raise _EndpointUnavailable(f"{url} did not return JSON") from err
 
+    async def _async_load_login_page(self) -> tuple[str, str, str]:
+        """Load the IServ login page from one of the known login URLs.
+
+        Returns ``(html, final_url, path)``. A page that really contains a login
+        form is preferred, because ``/iserv/app/login`` redirects on some IServ
+        versions and does not exist at all on others.
+        """
+        fallback: tuple[str, str, str] | None = None
+        last_error: IServError | None = None
+        for path in LOGIN_PATHS:
+            try:
+                html, url = await self._async_text("GET", self._url(path))
+            except IServError as err:
+                last_error = err
+                _LOGGER.debug("IServ login page %s is not usable: %s", path, err)
+                continue
+
+            for _ in range(MAX_LOGIN_REDIRECTS):
+                target = _meta_refresh_url(html, url)
+                if not target or target == url:
+                    break
+                _LOGGER.debug("IServ login page %s redirects to %s", path, target)
+                html, url = await self._async_text("GET", target)
+
+            if _is_login_form(html):
+                _LOGGER.debug(
+                    "IServ login form found on %s (title: %s)",
+                    path,
+                    _page_title(html) or "none",
+                )
+                return html, url, path
+            _LOGGER.debug(
+                "IServ page %s has no login form (title: %s)",
+                path,
+                _page_title(html) or "none",
+            )
+            if fallback is None:
+                fallback = (html, url, path)
+
+        if fallback is not None:
+            return fallback
+        if last_error is not None:
+            raise last_error
+        raise IServConnectionError("No IServ login page could be loaded")
+
     async def async_login(self) -> None:
         """Log in to IServ and keep the session cookie for later requests."""
         self._logged_in = False
-        html, url = await self._async_text("GET", self._url(APP_LOGIN_PATH))
-        for _ in range(MAX_LOGIN_REDIRECTS):
-            target = _meta_refresh_url(html, url)
-            if target is None or target == url:
-                break
-            html, url = await self._async_text("GET", target)
-
-        if not _is_login_form(html):
-            # Some installations answer with the dashboard right away.
+        html, url, path = await self._async_load_login_page()
+        form = _find_login_form(html, url)
+        if form is None:
+            # No login form: the server may use single sign-on or the request
+            # was already authenticated. The first API call shows whether that
+            # assumption was right.
+            _LOGGER.debug("IServ page %s shows no login form, using the session", path)
             self._logged_in = True
             return
 
-        payload = _login_hidden_fields(html)
-        payload[_form_field(html, ("user", "login", "benutz"), "_username")] = self._username
-        payload[_form_field(html, ("pass", "pwd", "kennwort"), "_password")] = self._password
+        payload = dict(form.hidden)
+        payload[form.username_field] = self._username
+        payload[form.password_field] = self._password
+        _LOGGER.debug(
+            "IServ login form %s -> %s (user field %r, password field %r, %s hidden field(s))",
+            path,
+            form.action,
+            form.username_field,
+            form.password_field,
+            len(form.hidden),
+        )
 
-        response_text, _ = await self._async_text("POST", _form_action(html, url), data=payload)
+        response_text, final_url = await self._async_text(
+            form.method.upper(),
+            form.action,
+            data=payload,
+            headers={"Referer": url, "Origin": self._base_url},
+        )
         if _is_login_form(response_text):
-            raise IServAuthError("IServ rejected the username or the password")
+            reason = _login_error_reason(response_text)
+            detail = f" ({reason})" if reason else ""
+            _LOGGER.warning(
+                "IServ login for '%s' on %s failed%s (title: %s, URL: %s)",
+                self._username,
+                self._base_url,
+                detail,
+                _page_title(response_text) or "none",
+                final_url,
+            )
+            raise IServAuthError(
+                f"IServ rejected the login for '{self._username}'{detail}"
+            )
+
         self._logged_in = True
+        _LOGGER.debug("IServ login successful (%s -> %s)", path, final_url)
 
     async def _async_fetch_current_timetable(self, week_offset: int) -> Any:
         """Fetch one week from the DieSchulApp JSON API (with substitutions)."""
@@ -900,11 +1055,8 @@ class IServApiClient:
         text, final_url = await self._async_text("GET", url)
         return self._loads(text, final_url)
 
-    async def async_get_lessons(self, week_offset: int = 0) -> list[IServLesson]:
-        """Return the lessons of a week (0 = current week)."""
-        if not self._logged_in:
-            await self.async_login()
-
+    async def _async_get_lessons_once(self, week_offset: int) -> list[IServLesson]:
+        """Try every known IServ timetable endpoint once."""
         monday = _week_monday(week_offset)
         problems: list[str] = []
         for fetch, parse in (
@@ -925,6 +1077,19 @@ class IServApiClient:
         raise IServConnectionError(
             f"No usable IServ endpoint for week {week_offset}: {'; '.join(problems)}"
         )
+
+    async def async_get_lessons(self, week_offset: int = 0) -> list[IServLesson]:
+        """Return the lessons of a week (0 = current week)."""
+        if not self._logged_in:
+            await self.async_login()
+        try:
+            return await self._async_get_lessons_once(week_offset)
+        except IServAuthError:
+            # IServ sessions expire, so try exactly one fresh login before
+            # reporting a problem.
+            _LOGGER.debug("IServ session expired while reading week %s", week_offset)
+            await self.async_login()
+            return await self._async_get_lessons_once(week_offset)
 
 
 # ---------------------------------------------------------------------------

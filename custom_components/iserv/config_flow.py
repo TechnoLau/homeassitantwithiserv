@@ -16,7 +16,14 @@ from homeassistant.config_entries import (
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from . import IServApiClient, IServAuthError, IServConnectionError, normalize_host
+from . import (
+    IServApiClient,
+    IServAuthError,
+    IServConnectionError,
+    IServDataError,
+    IServError,
+    normalize_host,
+)
 from .const import (
     CONF_HOST,
     CONF_PASSWORD,
@@ -47,18 +54,46 @@ def _unique_id(data: Mapping[str, Any]) -> str:
 async def _async_validate_input(
     hass: HomeAssistant, data: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """Log in once to verify the credentials and normalise the entry data."""
+    """Log in once to verify the credentials and normalise the entry data.
+
+    The login is verified in two steps, so that a wrong password and a server
+    that answers the login but not the timetable API can be told apart:
+    ``IServAuthError`` means the credentials were rejected, ``IServDataError``
+    means the login worked but no timetable could be read.
+    """
     host = normalize_host(str(data[CONF_HOST]))
+    username = str(data[CONF_USERNAME]).strip()
     client = IServApiClient(
         async_get_clientsession(hass),
         host,
-        str(data[CONF_USERNAME]).strip(),
+        username,
         str(data[CONF_PASSWORD]),
     )
     await client.async_login()
+
+    try:
+        await client.async_get_lessons(0)
+    except IServAuthError as err:
+        _LOGGER.warning(
+            "IServ login for '%s' on %s worked, but the timetable API rejected "
+            "the session: %s",
+            username,
+            host,
+            err,
+        )
+        raise IServDataError(str(err)) from err
+    except IServError as err:
+        _LOGGER.warning(
+            "IServ login for '%s' on %s worked, but no timetable could be read: %s",
+            username,
+            host,
+            err,
+        )
+        raise IServDataError(str(err)) from err
+
     return {
         CONF_HOST: host,
-        CONF_USERNAME: str(data[CONF_USERNAME]).strip(),
+        CONF_USERNAME: username,
         CONF_PASSWORD: str(data[CONF_PASSWORD]),
     }
 
@@ -88,6 +123,8 @@ class IServConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_auth"
             except IServConnectionError:
                 errors["base"] = "cannot_connect"
+            except IServDataError:
+                errors["base"] = "cannot_read_timetable"
             except Exception:  # noqa: BLE001 - never leak unexpected errors
                 _LOGGER.exception("Unexpected error while configuring IServ")
                 errors["base"] = "unknown"
@@ -138,6 +175,8 @@ class IServConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_auth"
             except IServConnectionError:
                 errors["base"] = "cannot_connect"
+            except IServDataError:
+                errors["base"] = "cannot_read_timetable"
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Unexpected error while re-authenticating IServ")
                 errors["base"] = "unknown"
@@ -176,6 +215,8 @@ class IServConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_auth"
             except IServConnectionError:
                 errors["base"] = "cannot_connect"
+            except IServDataError:
+                errors["base"] = "cannot_read_timetable"
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Unexpected error while reconfiguring IServ")
                 errors["base"] = "unknown"

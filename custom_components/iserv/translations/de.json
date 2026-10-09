@@ -1,0 +1,68 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "IServ-Konto einrichten",
+        "description": "Melde dich mit deinem IServ-Konto an, um Stundenplan und Vertretungsplan zu lesen.",
+        "data": {
+          "host": "Server (z. B. schule.iserv.de)",
+          "username": "Benutzername",
+          "password": "Passwort"
+        }
+      },
+      "reauth_confirm": {
+        "title": "IServ-Anmeldung erneuern",
+        "description": "Die Anmeldung an {host} ist nicht mehr gültig. Bitte gib dein Passwort erneut ein.",
+        "data": {
+          "username": "Benutzername",
+          "password": "Passwort"
+        }
+      },
+      "reconfigure": {
+        "title": "IServ-Konto bearbeiten",
+        "description": "Ändere den Server oder die Zugangsdaten für IServ.",
+        "data": {
+          "host": "Server (z. B. schule.iserv.de)",
+          "username": "Benutzername",
+          "password": "Passwort"
+        }
+      }
+    },
+    "error": {
+      "invalid_host": "Die Serveradresse ist kein gültiger IServ-Host.",
+      "invalid_auth": "Benutzername oder Passwort ist falsch.",
+      "cannot_connect": "Der IServ-Server ist nicht erreichbar.",
+      "unknown": "Unerwarteter Fehler, bitte prüfe das Home-Assistant-Protokoll."
+    },
+    "abort": {
+      "already_configured": "Dieses IServ-Konto ist bereits eingerichtet.",
+      "reauth_successful": "Die Anmeldung wurde erfolgreich erneuert.",
+      "reconfigure_successful": "Das IServ-Konto wurde erfolgreich aktualisiert.",
+      "unknown": "Unerwarteter Fehler, bitte prüfe das Home-Assistant-Protokoll."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "IServ-Optionen",
+        "description": "Lege fest, wie oft Stundenplan und Vertretungsplan abgerufen werden.",
+        "data": {
+          "scan_interval": "Aktualisierungsintervall (Minuten)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "timetable": {
+        "name": "Stundenplan"
+      },
+      "substitutions": {
+        "name": "Vertretungen"
+      },
+      "next_school_start": {
+        "name": "Schulbeginn"
+      }
+    }
+  }
+}

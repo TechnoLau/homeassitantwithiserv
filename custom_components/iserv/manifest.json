@@ -1,0 +1,13 @@
+{
+  "domain": "iserv",
+  "name": "IServ",
+  "codeowners": ["@TechnoLau"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/TechnoLau/homeassitantwithiserv",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/TechnoLau/homeassitantwithiserv/issues",
+  "requirements": [],
+  "version": "1.0.0"
+}

@@ -1,0 +1,68 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to IServ",
+        "description": "Sign in with your IServ account to read your timetable and substitution plan.",
+        "data": {
+          "host": "Server (e.g. school.iserv.de)",
+          "username": "Username",
+          "password": "Password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Renew IServ login",
+        "description": "The login for {host} is no longer valid. Please enter your password again.",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      },
+      "reconfigure": {
+        "title": "Edit IServ account",
+        "description": "Change the server or the credentials used for IServ.",
+        "data": {
+          "host": "Server (e.g. school.iserv.de)",
+          "username": "Username",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_host": "The server address is not a valid IServ host.",
+      "invalid_auth": "The username or password is incorrect.",
+      "cannot_connect": "Could not reach the IServ server.",
+      "unknown": "Unexpected error, please check the Home Assistant log."
+    },
+    "abort": {
+      "already_configured": "This IServ account is already configured.",
+      "reauth_successful": "The login was renewed successfully.",
+      "reconfigure_successful": "The IServ account was updated successfully.",
+      "unknown": "Unexpected error, please check the Home Assistant log."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "IServ options",
+        "description": "Adjust how often the timetable and substitution plan are fetched.",
+        "data": {
+          "scan_interval": "Update interval (minutes)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "timetable": {
+        "name": "Timetable"
+      },
+      "substitutions": {
+        "name": "Substitutions"
+      },
+      "next_school_start": {
+        "name": "Next school start"
+      }
+    }
+  }
+}
